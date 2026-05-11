@@ -1,6 +1,6 @@
 # VaultPass
 
-**VaultPass** is a fully offline, single-file password manager for Windows. It stores passwords, payment cards, addresses, login groups, and images — all encrypted locally on your machine. No cloud. No accounts. No telemetry.
+**VaultPass** is a fully offline, single-file password manager for **Windows and Linux**. It stores passwords, payment cards, addresses, login groups, and images — all encrypted locally on your machine. No cloud. No accounts. No telemetry.
 
 > **Personal-use software.** VaultPass is built and maintained for personal use. It is shared as-is, with no guarantees of fitness for any particular purpose. See the [Legal Disclaimer](#legal-disclaimer) and [License](#license) sections before use.
 
@@ -9,6 +9,7 @@
 ## Table of Contents
 
 - [Features](#features)
+- [Platform Support](#platform-support)
 - [Download & Install](#download--install)
 - [Running from Source](#running-from-source)
 - [Building the Executable](#building-the-executable)
@@ -36,47 +37,114 @@
 | **Vault format** | Single `.vpm` binary file — fully portable |
 | **Tabs** | Passwords, Cards, Addresses, Login Via, Images |
 | **Autofill** | Browser-aware overlay HUD — pastes directly into the focused field without stealing focus |
-| **Browser detection** | Chrome, Edge, Brave, Opera GX, Firefox, Waterfox (via Win32 ctypes, no extra installs) |
+| **Browser detection** | Chrome, Edge, Brave, Opera GX, Firefox, Waterfox, Librewolf (Win32 on Windows; xdotool on Linux) |
 | **Search** | Advanced query syntax with field filters, AND/OR/NOT, wildcards |
 | **Clipboard safety** | Clipboard auto-clears 30 seconds after copying a sensitive value |
 | **Offline** | Zero network access — everything stays on your machine |
-| **Single executable** | One `.exe` — no installer, no Python required |
+| **Single executable** | One file — no installer, no Python required (`VaultPass.exe` on Windows, `VaultPass` binary on Linux) |
+| **Platform** | Windows 10/11 · Linux (X11 / XWayland) |
+
+---
+
+## Platform Support
+
+| Feature | Windows 10/11 | Linux (X11 / XWayland) |
+|---|---|---|
+| Core vault (all tabs) | ✅ | ✅ |
+| Autofill HUD overlay | ✅ Native (Win32) | ✅ Requires `xdotool` |
+| Browser domain detection | ✅ Native (Win32) | ✅ Requires `xdotool` |
+| ▶ Fill (paste injection) | ✅ Native (SendInput) | ✅ Requires `xdotool` |
+| Pure Wayland (no XWayland) | — | ⚠️ Autofill unavailable; core vault works |
+
+> **Linux autofill** depends on `xdotool` for reading the active window and injecting Ctrl+V. Install it once with:
+> ```bash
+> sudo apt install xdotool        # Debian / Ubuntu / Mint
+> sudo dnf install xdotool        # Fedora / RHEL
+> sudo pacman -S xdotool          # Arch / Manjaro
+> ```
+> If `xdotool` is not installed, the **▶ Fill** button silently degrades to copy-only. All other vault features work without it.
 
 ---
 
 ## Download & Install
 
-Pre-built Windows executables are available on the [**Releases page**](https://github.com/Surrplexie/PW-vault/releases).
+Pre-built binaries for Windows and Linux are available on the [**Releases page**](https://github.com/Surrplexie/PW-vault/releases).
+
+### Windows
 
 1. Go to [https://github.com/Surrplexie/PW-vault/releases](https://github.com/Surrplexie/PW-vault/releases)
 2. Under the latest release, download **`VaultPass.exe`**
-3. Place `VaultPass.exe` in any folder you choose — it is fully self-contained
-4. Double-click to run; no installation is needed
+3. Place `VaultPass.exe` in any folder — it is fully self-contained
+4. Double-click to run; no installation needed
 
-> **Note:** Windows Defender or SmartScreen may flag an unsigned executable downloaded from the web. This is expected for unsigned personal-use software. You can right-click → **Properties** → **Unblock**, or click **More info → Run anyway** in SmartScreen, if you trust the source.
+> **SmartScreen warning:** Windows Defender or SmartScreen may flag an unsigned executable. This is expected for personal-use software. Right-click → **Properties** → **Unblock**, or click **More info → Run anyway** in SmartScreen if you trust the source.
 
-Your vault file (`!vault.vpm`) will be created in the **same folder as the executable** the first time you save.
+### Linux
+
+1. Go to [https://github.com/Surrplexie/PW-vault/releases](https://github.com/Surrplexie/PW-vault/releases)
+2. Under the latest release, download **`VaultPass`** (the Linux binary)
+3. Open a terminal where you saved it and make it executable:
+
+```bash
+chmod +x VaultPass
+./VaultPass
+```
+
+4. (Optional but recommended) install `xdotool` for autofill support:
+
+```bash
+sudo apt install xdotool    # Debian / Ubuntu / Mint
+```
+
+> **Linux note:** The binary is built against a specific glibc version. If it doesn't run on your distro, [build from source](#building-the-executable) instead — it takes under a minute.
+
+Your vault file (`!vault.vpm`) will be created in the **same folder as the binary** the first time you save.
 
 ---
 
 ## Running from Source
 
-**Requirements:** Python 3.11+, Windows
+**Requirements:** Python 3.11+
 
-```bash
-# 1. Clone the repository
+### Windows
+
+```bat
+:: 1. Clone the repository
 git clone https://github.com/Surrplexie/PW-vault.git
 cd PW-vault
 
-# 2. (Optional) create a virtual environment
+:: 2. (Optional) create a virtual environment
 python -m venv .venv
 .venv\Scripts\activate
 
-# 3. Install dependencies
+:: 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Run
+:: 4. Run
 python main.py
+```
+
+### Linux
+
+```bash
+# 1. Install system dependencies (once)
+sudo apt install python3 python3-pip python3-tk xdotool
+# Fedora: sudo dnf install python3 python3-pip python3-tkinter xdotool
+# Arch:   sudo pacman -S python python-pip tk xdotool
+
+# 2. Clone the repository
+git clone https://github.com/Surrplexie/PW-vault.git
+cd PW-vault
+
+# 3. (Optional) create a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 4. Install Python dependencies
+pip3 install -r requirements.txt
+
+# 5. Run
+python3 main.py
 ```
 
 `requirements.txt` contains:
@@ -89,19 +157,36 @@ Pillow>=10.0.0
 
 ## Building the Executable
 
+### Windows
+
 A convenience script is included to build a single-file Windows executable using PyInstaller.
 
 ```bat
 build_exe.bat
 ```
 
-This runs:
+This installs dependencies and runs:
 ```bat
-python -m pip install -r requirements.txt pyinstaller
 python -m PyInstaller --onefile --windowed --name VaultPass --clean main.py
 ```
 
-The finished executable will be at `dist\VaultPass.exe`.
+Output: `dist\VaultPass.exe`
+
+### Linux
+
+```bash
+chmod +x build_linux.sh
+./build_linux.sh
+```
+
+This installs dependencies and runs:
+```bash
+python3 -m PyInstaller --onefile --noconsole --name VaultPass --clean main.py
+```
+
+Output: `dist/VaultPass`
+
+> **Prerequisite:** `python3-tk` must be installed system-wide before building (`sudo apt install python3-tk`). PyInstaller bundles everything else.
 
 ---
 
@@ -216,7 +301,14 @@ When you switch to a browser window with a recognized domain, a small floating o
 - The overlay auto-hides after **20 seconds** of no interaction
 - The header bar can be dragged to reposition it
 
-**Supported browsers:** Chrome, Edge, Brave, Opera GX, Vivaldi, Firefox, Waterfox, Librewolf
+**Supported browsers:**
+
+| Platform | Browsers |
+|---|---|
+| Windows | Chrome, Edge, Brave, Opera GX, Vivaldi, Firefox, Waterfox, Librewolf |
+| Linux (X11) | Chrome, Chromium, Brave, Firefox, Waterfox, Librewolf, Edge, Opera, Vivaldi, Epiphany |
+
+> **Linux:** Autofill requires `xdotool`. Pure Wayland sessions (without XWayland) are not supported for autofill — the core vault still works fully.
 
 ---
 
@@ -225,7 +317,7 @@ When you switch to a browser window with a recognized domain, a small floating o
 | Detail | Value |
 |---|---|
 | Default filename | `!vault.vpm` |
-| Default location | Same folder as `VaultPass.exe` (or `main.py` when running from source) |
+| Default location | Same folder as `VaultPass.exe` / `VaultPass` binary (or `main.py` when running from source) |
 | Format | Binary: `VAULT1` header + 16-byte random salt + Fernet-encrypted JSON |
 | Extension | `.vpm` (VaultPass Module) |
 
@@ -259,10 +351,10 @@ You can back up your vault by simply copying the `.vpm` file. The file is encryp
 >
 > **By downloading or using VaultPass, you agree that:**
 >
-> - Surrplexie is **not responsible** for any loss of data, loss of access, corruption of vault files, security breaches, financial loss, or any other direct, indirect, incidental, special, or consequential damages arising from the use or inability to use this software.
+> - This repo is **not responsible** for any loss of data, loss of access, corruption of vault files, security breaches, financial loss, or any other direct, indirect, incidental, special, or consequential damages arising from the use or inability to use this software.
 > - This software is intended **strictly for personal use**. It is **not audited**, **not certified**, and **not recommended** for securing sensitive organizational, financial, medical, or legal data in a professional capacity.
 > - You are solely responsible for keeping your master password secure. **There is no password reset or account recovery.** Lost passwords mean permanently lost data.
-> - Surrplexie provides **no guarantee of continued maintenance**, updates, or bug fixes.
+> - This repo provides **no guarantee of continued maintenance**, updates, or bug fixes.
 > - Use of this software is **entirely at your own risk**.
 
 ---

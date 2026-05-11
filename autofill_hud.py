@@ -1,14 +1,17 @@
 """
 AutofillHUD — borderless, always-on-top, non-focus-stealing overlay.
+Cross-platform: Windows (Win32) and Linux (X11 / XWayland via xdotool).
 
 Key behaviour
 -------------
-• WS_EX_NOACTIVATE is applied via ctypes after the window maps, so clicking
-  any button in the overlay does NOT steal keyboard focus from the browser.
-  The browser's currently focused input field stays active.
+• The overlay does NOT steal keyboard focus from the browser.
+  Windows: WS_EX_NOACTIVATE is applied via ctypes after the window maps.
+  Linux:   overrideredirect(True) + xdotool handles injection without focus grab.
 
-• ▶ Fill copies the value to the clipboard and injects a Ctrl+V via
-  SendInput(), so the value is pasted directly into the focused field.
+• ▶ Fill copies the value to the clipboard then injects Ctrl+V into the
+  focused browser field:
+    Windows → SendInput() Win32 API
+    Linux   → xdotool key ctrl+v  (requires: sudo apt install xdotool)
 
 • The overlay auto-hides after AUTO_HIDE_MS milliseconds of no interaction.
 
@@ -20,8 +23,8 @@ Key behaviour
 
 from __future__ import annotations
 
-import ctypes
 import re
+import sys
 import tkinter as tk
 from difflib import SequenceMatcher
 from typing import Any
@@ -56,61 +59,76 @@ FILL_FIELDS = [
     ("Phone",    "Website Phone Number", False),
 ]
 
-# ── Win32 constants / helpers ─────────────────────────────────────────────────
+# ── Platform-specific: key injection + no-activate ───────────────────────────
 
-GWL_EXSTYLE      = -20
-WS_EX_NOACTIVATE = 0x08000000
-WS_EX_TOOLWINDOW = 0x00000080
-GA_ROOT          = 2
+if sys.platform == "win32":
+    import ctypes
 
-INPUT_KEYBOARD  = 1
-KEYEVENTF_KEYUP = 0x0002
-VK_CONTROL      = 0x11
-VK_V            = 0x56
+    GWL_EXSTYLE      = -20
+    WS_EX_NOACTIVATE = 0x08000000
+    WS_EX_TOOLWINDOW = 0x00000080
+    GA_ROOT          = 2
+    INPUT_KEYBOARD   = 1
+    KEYEVENTF_KEYUP  = 0x0002
+    VK_CONTROL       = 0x11
+    VK_V             = 0x56
 
+    class _KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk",         ctypes.c_ushort),
+            ("wScan",       ctypes.c_ushort),
+            ("dwFlags",     ctypes.c_ulong),
+            ("time",        ctypes.c_ulong),
+            ("dwExtraInfo", ctypes.c_ulong),
+        ]
 
-class _KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk",         ctypes.c_ushort),
-        ("wScan",       ctypes.c_ushort),
-        ("dwFlags",     ctypes.c_ulong),
-        ("time",        ctypes.c_ulong),
-        ("dwExtraInfo", ctypes.c_ulong),
-    ]
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [("ki", _KEYBDINPUT), ("_pad", ctypes.c_byte * 32)]
 
+    class _INPUT(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_ulong), ("_u", _INPUT_UNION)]
 
-class _INPUT_UNION(ctypes.Union):
-    _fields_ = [("ki", _KEYBDINPUT), ("_pad", ctypes.c_byte * 32)]
+    def _inject_paste() -> None:
+        """Inject Ctrl+V into the currently focused window via Win32 SendInput."""
+        def ki(vk: int, flags: int = 0) -> _INPUT:
+            return _INPUT(
+                type=INPUT_KEYBOARD,
+                _u=_INPUT_UNION(ki=_KEYBDINPUT(wVk=vk, dwFlags=flags)),
+            )
+        seq = [
+            ki(VK_CONTROL),
+            ki(VK_V),
+            ki(VK_V,       KEYEVENTF_KEYUP),
+            ki(VK_CONTROL, KEYEVENTF_KEYUP),
+        ]
+        arr = (_INPUT * 4)(*seq)
+        ctypes.windll.user32.SendInput(4, arr, ctypes.sizeof(_INPUT))
 
+    def _apply_noactivate(hwnd: int) -> None:
+        """Make window non-activating so clicking it won't steal keyboard focus."""
+        u    = ctypes.windll.user32
+        root = u.GetAncestor(hwnd, GA_ROOT)
+        ex   = u.GetWindowLongW(root, GWL_EXSTYLE)
+        u.SetWindowLongW(root, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
 
-class _INPUT(ctypes.Structure):
-    _fields_ = [("type", ctypes.c_ulong), ("_u", _INPUT_UNION)]
+else:
+    # Linux / X11 — xdotool handles paste injection; overrideredirect handles focus
+    import subprocess
 
+    def _inject_paste() -> None:
+        """Inject Ctrl+V into the currently focused X window via xdotool."""
+        try:
+            subprocess.Popen(
+                ["xdotool", "key", "ctrl+v"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            pass  # xdotool not installed — fill silently degrades to copy-only
 
-def _send_ctrl_v() -> None:
-    """Inject a Ctrl+V key sequence into whatever window is currently focused."""
-    def ki(vk: int, flags: int = 0) -> _INPUT:
-        return _INPUT(
-            type=INPUT_KEYBOARD,
-            _u=_INPUT_UNION(ki=_KEYBDINPUT(wVk=vk, dwFlags=flags)),
-        )
-
-    seq = [
-        ki(VK_CONTROL),
-        ki(VK_V),
-        ki(VK_V,       KEYEVENTF_KEYUP),
-        ki(VK_CONTROL, KEYEVENTF_KEYUP),
-    ]
-    arr = (_INPUT * 4)(*seq)
-    ctypes.windll.user32.SendInput(4, arr, ctypes.sizeof(_INPUT))
-
-
-def _set_noactivate(hwnd: int) -> None:
-    """Make window non-activating — clicking it won't steal keyboard focus."""
-    u = ctypes.windll.user32
-    root = u.GetAncestor(hwnd, GA_ROOT)
-    ex   = u.GetWindowLongW(root, GWL_EXSTYLE)
-    u.SetWindowLongW(root, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+    def _apply_noactivate(_hwnd: int) -> None:
+        """No-op on Linux: overrideredirect(True) already prevents focus stealing."""
+        pass
 
 
 # ── Match scoring ─────────────────────────────────────────────────────────────
@@ -124,11 +142,11 @@ def _base(domain: str) -> str:
 def _score(current: str, entry_domain: str) -> float:
     c = current.lower().strip("/")
     e = entry_domain.lower().strip("/")
-    if c == e:             return 1.00
+    if c == e:               return 1.00
     bc, be = _base(c), _base(e)
-    if bc == be:           return 0.95
+    if bc == be:             return 0.95
     if bc in be or be in bc: return 0.82
-    if c in e or e in c:   return 0.72
+    if c in e or e in c:     return 0.72
     r = SequenceMatcher(None, bc, be).ratio()
     return r if r >= 0.45 else 0.0
 
@@ -221,8 +239,7 @@ class AutofillHUD:
         w.geometry(f"{HUD_WIDTH}+{sw - HUD_WIDTH - 18}+60")
         w.protocol("WM_DELETE_WINDOW", self.hide)
         self._win = w
-        # Apply NOACTIVATE after window is mapped
-        w.after(150, lambda: _set_noactivate(w.winfo_id()))
+        w.after(150, lambda: _apply_noactivate(w.winfo_id()))
 
     def _rebuild(self, domain: str, matches: list[tuple[float, SiteEntry]]) -> None:
         for ch in self._win.winfo_children():
@@ -260,7 +277,6 @@ class AutofillHUD:
         pct = int(score * 100)
         col = GREEN if pct >= 90 else ACCENT if pct >= 72 else MUTED
 
-        # entry header bar
         eh = tk.Frame(self._win, bg=INPUT)
         eh.pack(fill="x", padx=5, pady=(5, 0))
         tk.Label(eh, text=f"  {ent.domain}", bg=INPUT, fg=FG,
@@ -292,7 +308,6 @@ class AutofillHUD:
                  font=("Consolas" if secret else "Segoe UI", 8),
                  anchor="w").pack(side="left", fill="x", expand=True, padx=(2, 4))
 
-        # ▶ Fill — paste into focused browser field (no focus steal)
         tk.Button(row, text="▶ Fill",
                   bg=ACCENT, fg="white",
                   relief="flat", font=("Segoe UI", 7, "bold"),
@@ -300,7 +315,6 @@ class AutofillHUD:
                   cursor="hand2", bd=0, padx=6, pady=1,
                   command=lambda v=val: self._fill(v)).pack(side="right", padx=(2, 0))
 
-        # Copy — clipboard only
         tk.Button(row, text="Copy",
                   bg=INPUT, fg=FG,
                   relief="flat", font=("Segoe UI", 7),
@@ -316,12 +330,12 @@ class AutofillHUD:
 
     def _fill(self, val: str) -> None:
         """
-        1. Copy val to clipboard (NOACTIVATE means browser still has focus)
-        2. After 80 ms (clipboard flush), inject Ctrl+V via SendInput
+        1. Copy val to clipboard (no focus change — browser still has focus)
+        2. After 80 ms (clipboard flush), inject Ctrl+V
         The browser's focused input receives the paste — no focus switch needed.
         """
         self._set_clip(val)
-        self._win.after(80, _send_ctrl_v)
+        self._win.after(80, _inject_paste)
         self._reset_timer()
 
     def _set_clip(self, val: str) -> None:
