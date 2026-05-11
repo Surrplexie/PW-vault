@@ -3,17 +3,19 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# PyInstaller
+# PyInstaller build artifacts
 build/
 dist/
-*.spec
+
+# Keep the project's spec file tracked
+!VaultPass.spec
 
 # Virtual environments
 .venv/
 venv/
 env/
 
-# Vault data
+# Vault data files — never commit your vault
 *.vpm
 
 # OS
