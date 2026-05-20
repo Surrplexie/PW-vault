@@ -1,4 +1,4 @@
-Dev logs, simple terms; REM-1, REM-2 = major logs entered here, REM-1.2, REM-1.4 etc. GitHub pushing only, not named here.
+Dev logs rules; REM-1, REM-2 any of these terms are the new 'updates' like "Update 1", all major logs entered here. Note; REM-1.2, REM-1.4 etc. are only for GitHub commits and pushing, never named here.
 
 ## REM-1
 
