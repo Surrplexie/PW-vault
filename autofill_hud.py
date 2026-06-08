@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 import sys
 import tkinter as tk
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -47,6 +48,7 @@ YELLOW = "#f9e2af"
 HUD_WIDTH    = 340
 MAX_MATCHES  = 3
 AUTO_HIDE_MS = 20_000
+MIN_SCORE    = 0.60   # drop weak fuzzy hits (e.g. Patreon on pokemon.com)
 
 _NULL_VALS = frozenset({"NULL", "NULLAAA", "NULLBBB", "NULLCCC", "NULLDDD", ""})
 
@@ -166,9 +168,15 @@ _SKIP_TOKENS = frozenset({
 })
 
 
+def _normalize(text: str) -> str:
+    """Lowercase ASCII fold — 'Pokémon' and 'pokemon' compare equal."""
+    folded = unicodedata.normalize("NFKD", text)
+    return folded.encode("ascii", "ignore").decode("ascii").lower()
+
+
 def _base(domain: str) -> str:
     """'sub.github.com' → 'github',  'paradox' → 'paradox'"""
-    s = domain.lower().replace("www.", "").strip("/")
+    s = _normalize(domain).replace("www.", "").strip("/")
     if "." in s:
         parts = s.split(".")
         return parts[-2] if len(parts) >= 2 else parts[0]
@@ -177,7 +185,7 @@ def _base(domain: str) -> str:
 
 def _entry_names(entry_domain: str) -> set[str]:
     """All comparable name tokens for a vault entry domain."""
-    e = entry_domain.lower().strip("/")
+    e = _normalize(entry_domain).strip("/")
     names = {e, _base(e)}
     if "." in e:
         names.add(e.split(".")[0])
@@ -186,7 +194,7 @@ def _entry_names(entry_domain: str) -> set[str]:
 
 def _page_tokens(page: str) -> set[str]:
     """Keywords extracted from a browser title / hostname fragment."""
-    s = page.lower().replace("www.", "").strip("/")
+    s = _normalize(page).replace("www.", "").strip("/")
     tokens: set[str] = set()
     for part in re.split(r"[\s/._\-+]+", s):
         part = _TLD_RE.sub("", part)
@@ -200,8 +208,8 @@ def _page_tokens(page: str) -> set[str]:
 
 
 def _score(current: str, entry_domain: str) -> float:
-    c = current.lower().strip("/")
-    e = entry_domain.lower().strip("/")
+    c = _normalize(current).strip("/")
+    e = _normalize(entry_domain).strip("/")
     if c == e:
         return 1.00
 
@@ -234,7 +242,7 @@ def find_matches(
     results = [
         (s, e)
         for e in entries
-        if (s := _score(domain, e.domain)) > 0
+        if (s := _score(domain, e.domain)) >= MIN_SCORE
     ]
     return sorted(results, key=lambda x: x[0], reverse=True)[:top_n]
 

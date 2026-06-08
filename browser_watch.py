@@ -204,6 +204,25 @@ class BrowserWatcher(threading.Thread):
         self._last_domain: str | None = None
         self._last_title:  str | None = None
         self.current_hwnd: int = 0
+        self._url_cache: tuple[int, str, str | None] = (0, "", None)
+
+    def _resolve_domain(self, title: str, hwnd: int) -> str | None:
+        """Prefer address-bar hostname; fall back to title parsing."""
+        if sys.platform == "win32" and hwnd:
+            cached_hwnd, cached_title, cached_host = self._url_cache
+            if cached_hwnd == hwnd and cached_title == title and cached_host:
+                return cached_host
+            try:
+                from browser_url import hostname_from_url, url_from_browser
+                host = hostname_from_url(url_from_browser(hwnd) or "")
+                if host:
+                    self._url_cache = (hwnd, title, host)
+                    return host
+            except Exception:
+                pass
+            self._url_cache = (hwnd, title, None)
+
+        return domain_from_title(title)
 
     def run(self) -> None:
         while self._running:
@@ -221,6 +240,7 @@ class BrowserWatcher(threading.Thread):
         self._last_domain = None
         self._last_title  = None
         self.current_hwnd = 0
+        self._url_cache   = (0, "", None)
 
     def _tick(self) -> None:
         cls, title, wid = _active_window()
@@ -232,7 +252,7 @@ class BrowserWatcher(threading.Thread):
                 self._after(0, self._on_clear)
             return
 
-        domain = domain_from_title(title)
+        domain = self._resolve_domain(title, wid)
         if not domain:
             if self._last_domain is not None:
                 self._last_domain = None

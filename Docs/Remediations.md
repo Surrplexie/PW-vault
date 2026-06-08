@@ -6,6 +6,53 @@ Dev logs rules; REM-1, REM-2 any of these terms are the new 'updates' like "Upd
 
 ## REM-3
 
+**AutoFill HUD — render fix, login-page matching, address-bar URL detection** (2026-06-08)
+
+### Problem
+- HUD appeared as a blank dark square (top-left) with no labels or Fill buttons.
+- Matching worked on main site pages (e.g. `pokemon.com/us`) but failed on login/SSO pages (e.g. `access.pokemon.com/login`, `accounts.paradoxplaza.com`) where the tab title is only a page name like “Pokémon Trainer Central”.
+- Weak fuzzy matches (Patreon, wemod) appeared alongside correct entries on some domains.
+
+### Root causes
+1. Invalid Tk geometry string (`340+1562+60` instead of `WIDTHxHEIGHT+X+Y`) — window created at default tiny size with no room for widgets.
+2. Domain detection relied on tab title only; login pages rarely include the hostname.
+3. Unicode in titles (`Pokémon`) did not match ASCII vault entries (`pokemon.com`).
+4. Fuzzy score floor was too low, allowing unrelated vault entries through.
+
+### Changes
+- **`autofill_hud.py`**
+  - Fixed HUD sizing via `_place_window()` — proper `WxH+X+Y` after `update_idletasks()`.
+  - Rebuilt match scoring: `_normalize()`, `_page_tokens()`, `_entry_names()`, subdomain/partial name matching.
+  - `MIN_SCORE = 0.60` to drop weak false positives.
+  - ASCII-safe UI labels (removed emoji/special chars that failed in some builds).
+- **`browser_watch.py`**
+  - Strip browser suffix (`- Brave`, `- Chrome`, etc.) before title parsing.
+  - `_resolve_domain()` prefers address-bar hostname over tab title.
+  - URL result cached per `(hwnd, title)` to limit UI Automation polling.
+- **`browser_url.py`** *(new)*
+  - Windows: read omnibox URL via `uiautomation` (`Address and search bar`).
+  - `hostname_from_url()` — strips scheme, path, and query tokens (`?login_challenge=…` ignored).
+- **`requirements.txt`** — `uiautomation>=2.0.18` (Windows only).
+- **`build_exe.bat`** — PyInstaller hidden imports for `uiautomation` / `comtypes`.
+
+### Behaviour after fix
+| Context | Detected as | Matches `pokemon.com` entry |
+|---|---|---|
+| `pokemon.com/us` (title contains domain) | `pokemon.com` | Yes (100%) |
+| `access.pokemon.com/login?…` (URL only) | `access.pokemon.com` | Yes (85%, subdomain) |
+| `Welcome to Paradox - Brave` (title only) | `welcome to paradox` | Yes (`paradox.com`) |
+| `Pokémon Trainer Central` (unicode title) | normalized → `pokemon` token | Yes |
+
+### Build / run notes
+```bat
+pip install -r requirements.txt
+python main.py
+```
+or `build_exe.bat` for `dist\VaultPass.exe`. Windows autofill URL detection requires `uiautomation`; without it, title-only matching still works but login pages are less reliable.
+
+### Files touched
+`autofill_hud.py`, `browser_watch.py`, `browser_url.py`, `requirements.txt`, `build_exe.bat`
+
 ## REM-4
 
 ## REM-2
