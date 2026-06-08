@@ -111,6 +111,26 @@ if sys.platform == "win32":
         ex   = u.GetWindowLongW(root, GWL_EXSTYLE)
         u.SetWindowLongW(root, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
 
+    def _focus_window(hwnd: int) -> None:
+        """Bring *hwnd* to the foreground so SendInput reaches the browser field."""
+        if not hwnd:
+            return
+        u   = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        fg  = u.GetForegroundWindow()
+        if fg == hwnd:
+            return
+        fg_tid = u.GetWindowThreadProcessId(fg, None)
+        cur_tid = k32.GetCurrentThreadId()
+        attached = False
+        if fg_tid != cur_tid:
+            attached = bool(u.AttachThreadInput(cur_tid, fg_tid, True))
+        try:
+            u.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                u.AttachThreadInput(cur_tid, fg_tid, False)
+
 else:
     # Linux / X11 — xdotool handles paste injection; overrideredirect handles focus
     import subprocess
@@ -128,6 +148,10 @@ else:
 
     def _apply_noactivate(_hwnd: int) -> None:
         """No-op on Linux: overrideredirect(True) already prevents focus stealing."""
+        pass
+
+    def _focus_window(_hwnd: int) -> None:
+        """No-op on Linux: xdotool targets the X11 focus window directly."""
         pass
 
 
@@ -192,11 +216,14 @@ class AutofillHUD:
     """
 
     def __init__(self, root: tk.Tk) -> None:
-        self._root      = root
+        self._root             = root
         self._win: tk.Toplevel | None = None
-        self._b_hwnd    = 0
+        self._b_hwnd           = 0
         self._hide_job: str | None = None
         self._dx = self._dy = 0
+        self._visible          = False
+        self._dismissed_domain: str | None = None
+        self._current_domain: str | None = None
 
     # ── public ────────────────────────────────────────────────────────────
 
@@ -205,25 +232,44 @@ class AutofillHUD:
         domain: str,
         matches: list[tuple[float, SiteEntry]],
         browser_hwnd: int,
+        *,
+        force: bool = False,
     ) -> None:
         self._b_hwnd = browser_hwnd
+        self._current_domain = domain
         if not matches:
             self.hide()
+            return
+        if not force and self._dismissed_domain == domain:
             return
         self._ensure_window()
         self._rebuild(domain, matches)
         self._win.deiconify()
         self._win.lift()
+        self._visible = True
         self._reset_timer()
 
-    def hide(self) -> None:
+    def hide(self, *, dismissed: bool = False) -> None:
+        if dismissed and self._current_domain:
+            self._dismissed_domain = self._current_domain
+        self._visible = False
+        self._cancel_timer()
         if self._win and self._win.winfo_exists():
             self._win.withdraw()
 
+    def show(self) -> None:
+        """Re-show after the user dismissed the overlay for the current domain."""
+        self._dismissed_domain = None
+
+    def is_visible(self) -> bool:
+        return bool(self._visible and self._win and self._win.winfo_exists())
+
     def destroy(self) -> None:
+        self._cancel_timer()
         if self._win and self._win.winfo_exists():
             self._win.destroy()
         self._win = None
+        self._visible = False
 
     # ── window lifecycle ───────────────────────────────────────────────────
 
@@ -258,7 +304,8 @@ class AutofillHUD:
         tk.Button(hdr, text="✕", bg=BG, fg=MUTED,
                   relief="flat", font=("Segoe UI", 10), bd=0, padx=8, pady=3,
                   activebackground=BG, activeforeground=DANGER,
-                  cursor="hand2", command=self.hide).pack(side="right")
+                  cursor="hand2",
+                  command=lambda: self.hide(dismissed=True)).pack(side="right")
 
         tk.Frame(self._win, bg=BORDER, height=1).pack(fill="x")
 
@@ -330,12 +377,18 @@ class AutofillHUD:
 
     def _fill(self, val: str) -> None:
         """
-        1. Copy val to clipboard (no focus change — browser still has focus)
-        2. After 80 ms (clipboard flush), inject Ctrl+V
-        The browser's focused input receives the paste — no focus switch needed.
+        1. Copy val to clipboard
+        2. Restore browser focus (needed after clicking the overlay)
+        3. Inject Ctrl+V into the focused browser field
         """
         self._set_clip(val)
-        self._win.after(80, _inject_paste)
+        hwnd = self._b_hwnd
+
+        def _paste() -> None:
+            _focus_window(hwnd)
+            self._win.after(60, _inject_paste)
+
+        self._win.after(80, _paste)
         self._reset_timer()
 
     def _set_clip(self, val: str) -> None:
@@ -356,7 +409,16 @@ class AutofillHUD:
 
     # ── auto-hide timer ────────────────────────────────────────────────────
 
+    def _cancel_timer(self) -> None:
+        if self._hide_job and self._win and self._win.winfo_exists():
+            self._win.after_cancel(self._hide_job)
+        self._hide_job = None
+
     def _reset_timer(self) -> None:
-        if self._hide_job:
-            self._root.after_cancel(self._hide_job)
-        self._hide_job = self._root.after(AUTO_HIDE_MS, self.hide)
+        self._cancel_timer()
+        if self._win and self._win.winfo_exists():
+            self._hide_job = self._win.after(AUTO_HIDE_MS, self._auto_hide)
+
+    def _auto_hide(self) -> None:
+        self._hide_job = None
+        self.hide()

@@ -11,13 +11,17 @@ Linux (X11 / XWayland):
   Note: pure Wayland sessions without XWayland are not supported.
 
 Supported browsers:
-  Windows → "Chrome_WidgetWin_1"  (Chrome, Edge, Brave, Opera GX, Vivaldi)
-            "MozillaWindowClass"  (Firefox, Waterfox, Librewolf)
+  Windows → Chrome_WidgetWin_1 with a known browser title suffix
+            (Chrome, Edge, Brave, Opera GX, Vivaldi)
+            MozillaWindowClass (Firefox, Waterfox, Librewolf)
   Linux   → class keywords: google-chrome, chromium, brave-browser, firefox,
             waterfox, librewolf, microsoft-edge, opera, vivaldi
 
-When the active browser domain changes, fires the on_change callback on the
-Tk main thread via tk.after().
+Electron apps (Cursor, VS Code, Discord, etc.) also use Chrome_WidgetWin_1
+but are excluded by requiring a known browser suffix in the window title.
+
+When the active browser domain or page title changes, fires the on_change
+callback on the Tk main thread via tk.after().
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ def domain_from_title(title: str) -> str | None:
 
     Strategies (in order):
       1. Direct domain.tld regex match — most reliable for "Sign in to github.com - …"
-      2. Split on separators and inspect penultimate chunk
+      2. Split on separators and inspect penultimate chunk (page name / site)
       3. Return cleaned first segment
     """
     if not title:
@@ -70,6 +74,21 @@ if sys.platform == "win32":
 
     _u32 = ctypes.windll.user32
 
+    # Chrome_WidgetWin_1 is shared by real Chromium browsers and Electron apps.
+    # Require a known browser suffix so Cursor / VS Code / Discord are ignored.
+    _WIN_CHROME_SUFFIXES = (
+        " - Google Chrome",
+        " - Microsoft Edge",
+        " - Mozilla Firefox",
+        " — Mozilla Firefox",
+        " - Brave",
+        " - Opera GX",
+        " - Opera",
+        " - Vivaldi",
+        " - Waterfox",
+        " - LibreWolf",
+    )
+
     _WIN_BROWSER_CLASSES = frozenset({
         "Chrome_WidgetWin_1",     # Chrome, Edge, Brave, Vivaldi, Opera GX
         "MozillaWindowClass",     # Firefox, Waterfox, Librewolf
@@ -85,8 +104,20 @@ if sys.platform == "win32":
         _u32.GetWindowTextW(hwnd, buf_txt, 512)
         return buf_cls.value, buf_txt.value, hwnd
 
-    def _is_browser(cls: str) -> bool:
-        return cls in _WIN_BROWSER_CLASSES
+    def _is_browser(cls: str, title: str) -> bool:
+        if cls not in _WIN_BROWSER_CLASSES:
+            return False
+        if cls == "MozillaWindowClass":
+            low = title.lower()
+            return any(
+                k in low
+                for k in ("mozilla firefox", "waterfox", "librewolf")
+            )
+        if cls == "Chrome_WidgetWin_1":
+            t = title.strip()
+            return any(t.endswith(suffix) for suffix in _WIN_CHROME_SUFFIXES)
+        # ApplicationFrameWindow — legacy Edge
+        return "edge" in title.lower()
 
 else:
     # Linux / macOS — uses xdotool (X11 or XWayland)
@@ -121,7 +152,7 @@ else:
             wid = 0
         return cls, title, wid
 
-    def _is_browser(cls: str) -> bool:
+    def _is_browser(cls: str, title: str) -> bool:
         c = cls.lower()
         return any(k in c for k in _LIN_BROWSER_KEYWORDS)
 
@@ -132,7 +163,7 @@ class BrowserWatcher(threading.Thread):
     """
     Daemon thread that polls the foreground window and fires *on_change*
     (via tk.after so it runs on the main thread) when the browser domain
-    changes.
+    or page title changes.
 
     Parameters
     ----------
@@ -150,12 +181,13 @@ class BrowserWatcher(threading.Thread):
         interval: float = 1.5,
     ) -> None:
         super().__init__(daemon=True, name="BrowserWatcher")
-        self._after     = after_fn
-        self._on_change = on_change
-        self._on_clear  = on_clear
-        self._interval  = interval
-        self._running   = True
+        self._after      = after_fn
+        self._on_change  = on_change
+        self._on_clear   = on_clear
+        self._interval   = interval
+        self._running    = True
         self._last_domain: str | None = None
+        self._last_title:  str | None = None
         self.current_hwnd: int = 0
 
     def run(self) -> None:
@@ -169,20 +201,32 @@ class BrowserWatcher(threading.Thread):
     def stop(self) -> None:
         self._running = False
 
+    def reset(self) -> None:
+        """Forget the last seen browser so the next poll can fire on_change."""
+        self._last_domain = None
+        self._last_title  = None
+        self.current_hwnd = 0
+
     def _tick(self) -> None:
         cls, title, wid = _active_window()
 
-        if not _is_browser(cls):
+        if not _is_browser(cls, title):
             if self._last_domain is not None:
                 self._last_domain = None
+                self._last_title  = None
                 self._after(0, self._on_clear)
             return
 
         domain = domain_from_title(title)
         if not domain:
+            if self._last_domain is not None:
+                self._last_domain = None
+                self._last_title  = None
+                self._after(0, self._on_clear)
             return
 
         self.current_hwnd = wid
-        if domain != self._last_domain:
+        if domain != self._last_domain or title != self._last_title:
             self._last_domain = domain
+            self._last_title  = title
             self._after(0, lambda d=domain, h=wid: self._on_change(d, h))

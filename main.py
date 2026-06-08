@@ -1857,13 +1857,18 @@ class VaultApp(tk.Tk):
             return
         if self._hud is None:
             self._hud = AutofillHUD(self)
-        if self._watcher is None or not self._watcher.is_alive():
-            self._watcher = BrowserWatcher(
-                after_fn=self.after,
-                on_change=self._on_browser_domain,
-                on_clear=self._on_browser_gone,
-            )
-            self._watcher.start()
+        else:
+            self._hud.show()
+        if self._watcher is not None:
+            self._watcher.stop()
+            self._watcher = None
+        self._watcher = BrowserWatcher(
+            after_fn=self.after,
+            on_change=self._on_browser_domain,
+            on_clear=self._on_browser_gone,
+        )
+        self._watcher.reset()
+        self._watcher.start()
         self._autofill_btn_var.set("AutoFill ON")
 
     def _stop_autofill(self) -> None:
@@ -1884,7 +1889,7 @@ class VaultApp(tk.Tk):
             self._set_status("AutoFill disabled.")
 
     def _on_browser_domain(self, domain: str, hwnd: int) -> None:
-        """Called on main thread when active browser domain changes."""
+        """Called on main thread when the active browser tab changes."""
         if not self._autofill_enabled or not self._master_pw:
             return
         matches = hud_find_matches(domain, self._passwords)
@@ -1895,6 +1900,8 @@ class VaultApp(tk.Tk):
                 f"🔑 AutoFill: {len(matches)} match(es) for '{domain}' — "
                 "focus a field in the browser, then click ▶ Fill"
             )
+        elif self._hud and not self._hud.is_visible():
+            self._set_status(f"AutoFill: no vault entries match '{domain}'.")
 
     def _on_browser_gone(self) -> None:
         """Called when the browser is no longer the foreground window."""
