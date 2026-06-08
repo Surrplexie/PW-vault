@@ -157,20 +157,70 @@ else:
 
 # ── Match scoring ─────────────────────────────────────────────────────────────
 
+_TLD_RE = re.compile(
+    r"\.(com|net|org|io|co|edu|gov|info|biz|app|dev|uk|ca|de|fr|au|nz|eu|tv|me|us)$"
+)
+_SKIP_TOKENS = frozenset({
+    "www", "com", "net", "org", "io", "co", "login", "sign", "account", "accounts",
+    "welcome", "home", "page", "the", "and", "for", "to", "in", "on",
+})
+
+
 def _base(domain: str) -> str:
-    """'sub.github.com' → 'github'"""
-    parts = domain.lower().replace("www.", "").split(".")
-    return parts[-2] if len(parts) >= 2 else parts[0]
+    """'sub.github.com' → 'github',  'paradox' → 'paradox'"""
+    s = domain.lower().replace("www.", "").strip("/")
+    if "." in s:
+        parts = s.split(".")
+        return parts[-2] if len(parts) >= 2 else parts[0]
+    return s
+
+
+def _entry_names(entry_domain: str) -> set[str]:
+    """All comparable name tokens for a vault entry domain."""
+    e = entry_domain.lower().strip("/")
+    names = {e, _base(e)}
+    if "." in e:
+        names.add(e.split(".")[0])
+    return {n for n in names if n}
+
+
+def _page_tokens(page: str) -> set[str]:
+    """Keywords extracted from a browser title / hostname fragment."""
+    s = page.lower().replace("www.", "").strip("/")
+    tokens: set[str] = set()
+    for part in re.split(r"[\s/._\-+]+", s):
+        part = _TLD_RE.sub("", part)
+        if len(part) >= 3 and part not in _SKIP_TOKENS:
+            tokens.add(part)
+    if "." in s:
+        tokens.add(_base(s))
+    else:
+        tokens.add(s)
+    return {t for t in tokens if t}
 
 
 def _score(current: str, entry_domain: str) -> float:
     c = current.lower().strip("/")
     e = entry_domain.lower().strip("/")
-    if c == e:               return 1.00
+    if c == e:
+        return 1.00
+
+    names = _entry_names(entry_domain)
+    page = _page_tokens(current)
+    for token in page:
+        for name in names:
+            if token == name:
+                return 0.95
+            if token in name or name in token:
+                return 0.85
+
     bc, be = _base(c), _base(e)
-    if bc == be:             return 0.95
-    if bc in be or be in bc: return 0.82
-    if c in e or e in c:     return 0.72
+    if bc == be:
+        return 0.95
+    if bc in be or be in bc:
+        return 0.82
+    if c in e or e in c:
+        return 0.72
     r = SequenceMatcher(None, bc, be).ratio()
     return r if r >= 0.45 else 0.0
 
@@ -244,6 +294,7 @@ class AutofillHUD:
             return
         self._ensure_window()
         self._rebuild(domain, matches)
+        self._place_window()
         self._win.deiconify()
         self._win.lift()
         self._visible = True
@@ -281,11 +332,18 @@ class AutofillHUD:
         w.attributes("-topmost", True)
         w.attributes("-alpha", 0.97)
         w.configure(bg=PANEL)
-        sw = self._root.winfo_screenwidth()
-        w.geometry(f"{HUD_WIDTH}+{sw - HUD_WIDTH - 18}+60")
         w.protocol("WM_DELETE_WINDOW", self.hide)
         self._win = w
         w.after(150, lambda: _apply_noactivate(w.winfo_id()))
+
+    def _place_window(self) -> None:
+        """Size and position the HUD (requires valid WxH+X+Y — not WIDTH+X+Y)."""
+        w = self._win
+        w.update_idletasks()
+        h = max(w.winfo_reqheight(), 120)
+        sw = self._root.winfo_screenwidth()
+        x = max(8, sw - HUD_WIDTH - 18)
+        w.geometry(f"{HUD_WIDTH}x{h}+{x}+60")
 
     def _rebuild(self, domain: str, matches: list[tuple[float, SiteEntry]]) -> None:
         for ch in self._win.winfo_children():
@@ -297,9 +355,9 @@ class AutofillHUD:
         hdr.bind("<ButtonPress-1>", self._drag_start)
         hdr.bind("<B1-Motion>",     self._drag_move)
 
-        tk.Label(hdr, text="🔑 AutoFill", bg=BG, fg=ACCENT,
+        tk.Label(hdr, text="AutoFill", bg=BG, fg=ACCENT,
                  font=("Segoe UI", 9, "bold"), padx=8, pady=5).pack(side="left")
-        tk.Label(hdr, text=f"↗ {domain}", bg=BG, fg=MUTED,
+        tk.Label(hdr, text=f"  {domain}", bg=BG, fg=MUTED,
                  font=("Segoe UI", 8)).pack(side="left")
         tk.Button(hdr, text="✕", bg=BG, fg=MUTED,
                   relief="flat", font=("Segoe UI", 10), bd=0, padx=8, pady=3,
@@ -316,7 +374,7 @@ class AutofillHUD:
         # ── footer hint ────────────────────────────────────────────────────
         tk.Frame(self._win, bg=PANEL, height=3).pack()
         tk.Label(self._win,
-                 text="▶ Fill = paste into focused browser field  •  fades in 20 s",
+                 text="Fill = paste into focused browser field  |  auto-hides in 20 s",
                  bg=PANEL, fg=MUTED, font=("Segoe UI", 7),
                  wraplength=HUD_WIDTH - 12, pady=4).pack(fill="x", padx=6)
 
@@ -355,7 +413,7 @@ class AutofillHUD:
                  font=("Consolas" if secret else "Segoe UI", 8),
                  anchor="w").pack(side="left", fill="x", expand=True, padx=(2, 4))
 
-        tk.Button(row, text="▶ Fill",
+        tk.Button(row, text="Fill",
                   bg=ACCENT, fg="white",
                   relief="flat", font=("Segoe UI", 7, "bold"),
                   activebackground=ACTH, activeforeground="white",

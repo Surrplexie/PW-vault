@@ -39,6 +39,13 @@ _DOMAIN_RE = re.compile(
     r"\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)\b"
 )
 _SEP_RE = re.compile(r"\s+[–—|·•]\s+|\s+-\s+")
+_BROWSER_SUFFIX_RE = re.compile(
+    r"\s+[-–—]\s+("
+    r"Google Chrome|Microsoft Edge|Mozilla Firefox|Brave|Opera GX|Opera|"
+    r"Vivaldi|Waterfox|LibreWolf"
+    r")\s*$",
+    re.IGNORECASE,
+)
 
 
 def domain_from_title(title: str) -> str | None:
@@ -58,13 +65,21 @@ def domain_from_title(title: str) -> str | None:
         if "." in cand and len(cand) > 4:
             return cand
 
-    parts = [p.strip() for p in _SEP_RE.split(title)]
-    if len(parts) >= 2:
-        candidate = parts[-2].lower()
-        if candidate:
-            return candidate
+    page = _BROWSER_SUFFIX_RE.sub("", title.strip())
+    if not page:
+        return None
 
-    return None
+    for m in _DOMAIN_RE.finditer(page):
+        cand = m.group(1).lower()
+        if "." in cand and len(cand) > 4:
+            return cand
+
+    parts = [p.strip() for p in _SEP_RE.split(page) if p.strip()]
+    if len(parts) >= 2:
+        # Browser name already removed — last chunk is usually the site/page name.
+        return parts[-1].lower()
+
+    return page.lower()
 
 
 # ── Platform-specific: get active window class + title + id ───────────────────
