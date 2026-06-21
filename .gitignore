@@ -17,6 +17,7 @@ env/
 
 # Vault data files — never commit your vault
 *.vpm
+*.vpm.bak
 
 # OS
 Thumbs.db

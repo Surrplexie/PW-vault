@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
+import shutil
+import sys
+import time
+from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet
@@ -47,3 +50,59 @@ def encrypt_vault(password: str, data: dict[str, Any]) -> bytes:
 def decrypt_vault(password: str, blob: bytes) -> dict[str, Any]:
     raw = decrypt_blob(password, blob)
     return json.loads(raw.decode("utf-8"))
+
+
+def vault_backup_path(path: Path) -> Path:
+    """Return the single rotating backup path for a vault file."""
+    path = Path(path)
+    return path.with_name(path.name + ".bak")
+
+
+def _atomic_replace(src: Path, dst: Path) -> None:
+    """Replace dst with src; retry briefly on Windows file-lock races."""
+    attempts = 8 if sys.platform == "win32" else 1
+    last_err: OSError | None = None
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as err:
+            last_err = err
+            if i + 1 < attempts:
+                time.sleep(0.025 * (i + 1))
+    if last_err is not None:
+        raise last_err
+
+
+def _write_backup(path: Path, bak: Path) -> None:
+    try:
+        shutil.copy2(path, bak)
+    except OSError:
+        pass
+
+
+def save_vault_blob(path: Path, blob: bytes) -> None:
+    """
+    Atomically write encrypted vault bytes.
+
+    Writes to a same-directory temp file, fsyncs, optionally copies the
+    previous vault to ``<name>.bak``, then replaces the target in one step.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(blob)
+            f.flush()
+            os.fsync(f.fileno())
+        if path.exists() and path.stat().st_size > 0:
+            _write_backup(path, vault_backup_path(path))
+        _atomic_replace(tmp, path)
+    except Exception:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise

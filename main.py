@@ -16,7 +16,7 @@ try:
 except ImportError:
     PIL_OK = False
 
-from vault_crypto import decrypt_vault, encrypt_vault
+from vault_crypto import decrypt_vault, encrypt_vault, save_vault_blob
 from vault_format import SiteEntry, parse_vault_text, serialize_vault_text
 from vault_items import (
     AddressEntry, CardEntry, ImageEntry, LoginGroup, parse_preamble,
@@ -1658,8 +1658,7 @@ class VaultApp(tk.Tk):
     def _autosave_silent(self) -> None:
         if not self._master_pw: return
         blob = encrypt_vault(self._master_pw, self._vault_dict())
-        self._vault_path.parent.mkdir(parents=True, exist_ok=True)
-        self._vault_path.write_bytes(blob)
+        save_vault_blob(self._vault_path, blob)
 
     def _autosave(self) -> None:
         if not self._master_pw: return

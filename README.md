@@ -323,7 +323,9 @@ When you switch to a browser window with a recognized domain, a small floating o
 
 You can back up your vault by simply copying the `.vpm` file. The file is encrypted and safe to store on a USB drive, cloud folder, etc. — it cannot be read without your master password.
 
-> `.vpm` files are excluded from version control by `.gitignore` — your vault will never be accidentally committed to a repository.
+On each save, VaultPass keeps one automatic backup alongside the vault: `!vault.vpm.bak` holds the previous version (same folder, same encryption). If a save is interrupted, the main `.vpm` file should remain intact; you can also restore from the `.bak` by renaming it.
+
+> `.vpm` and `.vpm.bak` files are excluded from version control by `.gitignore` — your vault will never be accidentally committed to a repository.
 
 ---
 
@@ -332,6 +334,7 @@ You can back up your vault by simply copying the `.vpm` file. The file is encryp
 - **Key derivation:** PBKDF2-HMAC-SHA256 with 480,000 iterations and a 16-byte random salt per save
 - **Encryption:** Fernet (AES-128-CBC + HMAC-SHA256) from the `cryptography` library
 - **Salt:** Re-generated on every save — each saved file has a unique salt
+- **Atomic saves:** Each save writes to a temp file in the same folder, then replaces the vault in one step; the previous vault is copied to `<name>.bak` first
 - **No master password storage:** The password is never written to disk in any form; it only exists in memory for the duration of the session
 - **Clipboard:** Sensitive values are automatically purged from the clipboard 30 seconds after copying
 - **No network:** VaultPass makes zero outbound network requests

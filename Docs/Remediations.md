@@ -55,6 +55,38 @@ or `build_exe.bat` for `dist\VaultPass.exe`. Windows autofill URL detection requ
 
 ## REM-4
 
+**Atomic vault saves + `.bak` rotation** (2026-06-21)
+
+### Problem
+- `_autosave_silent()` wrote encrypted bytes directly to the vault path (`write_bytes`).
+- A crash or power loss mid-write could truncate or corrupt the only on-disk copy of the vault.
+
+### Changes
+- **`vault_crypto.py`**
+  - `save_vault_blob()` — write to a same-directory temp file, `fsync`, copy previous vault to `<name>.bak`, then `os.replace()` into place (with brief retries on Windows file-lock races).
+  - `vault_backup_path()` — helper for the single rotating backup filename.
+  - Removed unused `hashlib` import.
+- **`main.py`** — `_autosave_silent()` now calls `save_vault_blob()` instead of direct `write_bytes`.
+- **`.gitignore`** — ignore `*.vpm.bak` alongside `*.vpm`.
+- **`tests/test_vault_crypto.py`** — round-trip crypto, backup rotation, and failed-replace cleanup.
+
+### Behaviour after fix
+| Scenario | Result |
+|---|---|
+| First save (new vault) | Atomic write; no `.bak` created |
+| Subsequent saves | Previous vault copied to `!vault.vpm.bak`, then new blob replaces `!vault.vpm` atomically |
+| Crash during write | Temp file may remain; existing `.vpm` (and `.bak` if present) stay intact |
+
+### Build / run notes
+```bat
+pip install -r requirements.txt
+python -m unittest discover -s tests -v
+python main.py
+```
+
+### Files touched
+`vault_crypto.py`, `main.py`, `.gitignore`, `tests/test_vault_crypto.py`
+
 ## REM-2
 
 ## REM-3
