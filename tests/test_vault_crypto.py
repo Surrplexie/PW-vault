@@ -10,6 +10,7 @@ from unittest.mock import patch
 from vault_crypto import (
     decrypt_vault,
     encrypt_vault,
+    restore_vault_from_backup,
     save_vault_blob,
     vault_backup_path,
 )
@@ -66,6 +67,28 @@ class SaveVaultBlobTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), b"VAULT1-initial")
             leftovers = list(Path(tmp).glob("*.tmp"))
             self.assertEqual(leftovers, [])
+
+    def test_restore_overwrites_vault_without_rotating_bak(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "!vault.vpm"
+            first = b"VAULT1-first-save"
+            second = b"VAULT1-second-save"
+            save_vault_blob(path, first)
+            save_vault_blob(path, second)
+            bak = vault_backup_path(path)
+            self.assertEqual(bak.read_bytes(), first)
+
+            restore_vault_from_backup(path)
+
+            self.assertEqual(path.read_bytes(), first)
+            self.assertEqual(bak.read_bytes(), first)
+
+    def test_restore_missing_backup_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "!vault.vpm"
+            save_vault_blob(path, b"VAULT1-only")
+            with self.assertRaises(FileNotFoundError):
+                restore_vault_from_backup(path)
 
 
 if __name__ == "__main__":

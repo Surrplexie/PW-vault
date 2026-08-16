@@ -273,8 +273,17 @@ class AutofillHUD:
     hud.hide()
     """
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        copy_fn=None,
+        hide_ms: int = AUTO_HIDE_MS,
+        activity_fn=None,
+    ) -> None:
         self._root             = root
+        self._copy_fn          = copy_fn
+        self._activity_fn      = activity_fn
+        self._hide_ms          = max(1000, int(hide_ms))
         self._win: tk.Toplevel | None = None
         self._b_hwnd           = 0
         self._hide_job: str | None = None
@@ -282,6 +291,11 @@ class AutofillHUD:
         self._visible          = False
         self._dismissed_domain: str | None = None
         self._current_domain: str | None = None
+
+    def set_hide_ms(self, ms: int) -> None:
+        self._hide_ms = max(1000, int(ms))
+        if self._visible:
+            self._reset_timer()
 
     # ── public ────────────────────────────────────────────────────────────
 
@@ -381,8 +395,9 @@ class AutofillHUD:
 
         # ── footer hint ────────────────────────────────────────────────────
         tk.Frame(self._win, bg=PANEL, height=3).pack()
+        hide_s = max(1, round(self._hide_ms / 1000))
         tk.Label(self._win,
-                 text="Fill = paste into focused browser field  |  auto-hides in 20 s",
+                 text=f"Fill = paste into focused browser field  |  auto-hides in {hide_s} s",
                  bg=PANEL, fg=MUTED, font=("Segoe UI", 7),
                  wraplength=HUD_WIDTH - 12, pady=4).pack(fill="x", padx=6)
 
@@ -439,6 +454,7 @@ class AutofillHUD:
 
     def _copy_only(self, val: str) -> None:
         self._set_clip(val)
+        self._note_activity()
         self._reset_timer()
 
     def _fill(self, val: str) -> None:
@@ -455,12 +471,20 @@ class AutofillHUD:
             self._win.after(60, _inject_paste)
 
         self._win.after(80, _paste)
+        self._note_activity()
         self._reset_timer()
 
     def _set_clip(self, val: str) -> None:
+        if self._copy_fn:
+            self._copy_fn(val)
+            return
         self._root.clipboard_clear()
         self._root.clipboard_append(val)
         self._root.update()
+
+    def _note_activity(self) -> None:
+        if self._activity_fn:
+            self._activity_fn()
 
     # ── drag ──────────────────────────────────────────────────────────────
 
@@ -483,7 +507,7 @@ class AutofillHUD:
     def _reset_timer(self) -> None:
         self._cancel_timer()
         if self._win and self._win.winfo_exists():
-            self._hide_job = self._win.after(AUTO_HIDE_MS, self._auto_hide)
+            self._hide_job = self._win.after(self._hide_ms, self._auto_hide)
 
     def _auto_hide(self) -> None:
         self._hide_job = None

@@ -81,6 +81,35 @@ def _write_backup(path: Path, bak: Path) -> None:
         pass
 
 
+def restore_vault_from_backup(path: Path) -> Path:
+    """
+    Overwrite ``path`` with its ``.bak`` copy without rotating the backup.
+
+    The backup file is left unchanged so a second restore is still possible.
+    """
+    path = Path(path)
+    bak = vault_backup_path(path)
+    if not bak.is_file() or bak.stat().st_size == 0:
+        raise FileNotFoundError(f"No backup found at {bak}")
+    blob = bak.read_bytes()
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.restore.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(blob)
+            f.flush()
+            os.fsync(f.fileno())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_replace(tmp, path)
+    except Exception:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+    return bak
+
+
 def save_vault_blob(path: Path, blob: bytes) -> None:
     """
     Atomically write encrypted vault bytes.

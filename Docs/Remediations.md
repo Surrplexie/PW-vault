@@ -87,6 +87,48 @@ python main.py
 ### Files touched
 `vault_crypto.py`, `main.py`, `.gitignore`, `tests/test_vault_crypto.py`
 
+## REM-5
+
+**Idle lock, settings, list QoL, clipboard countdown, backup restore** (2026-08-16)
+
+### Problem
+Daily use still required too many clicks, and locking the vault did not actually forget decrypted data. Timeouts were hardcoded, the `.bak` file had no restore UI, and the clipboard “clears in 30s” message never counted down.
+
+### Changes
+- **`vault_settings.py`** *(new)* — `vaultpass.settings.json` beside the app: clipboard clear, HUD auto-hide, idle lock, autofill default, last vault path.
+- **`main.py`**
+  - Idle auto-lock (default 10 min, configurable Off–30 min) plus **Ctrl+L**.
+  - Lock / idle / exit wipe in-memory entries and destroy the HUD; clipboard is cleared.
+  - Settings dialog (File → Settings… and toolbar).
+  - List right-click menu: copy username/password/email (or card/address fields), Edit, Duplicate, Delete.
+  - **Ctrl+C** copies the primary secret when focus is not in a text field; **Ctrl+D** duplicates.
+  - Duplicate clones the selected item as `(copy)` and opens the editor.
+  - Clipboard status ticks down with **Keep** / **Clear now**.
+  - File → Restore from backup… writes `.bak` over the vault without rotating the backup.
+  - Unlock screen **Show/Hide** for the master password; remembers last vault path.
+- **`autofill_hud.py`** — HUD hide delay follows settings; Copy/Fill uses the app clipboard countdown and counts as activity.
+- **`vault_crypto.py`** — `restore_vault_from_backup()`.
+- **`.gitignore`** — `vaultpass.settings.json`.
+- **Tests** — settings round-trip/clamp; backup restore without rotating `.bak`.
+
+### Behaviour after change
+| Action | Result |
+|---|---|
+| Walk away for the idle interval | Vault locks, RAM lists cleared, unlock screen shown |
+| Copy a password | Status bar counts down; Keep keeps it until next copy or lock |
+| Right-click a password | Copy password / username / email, Edit, Duplicate, Delete |
+| File → Restore from backup | Current `.vpm` replaced with previous save; re-unlock required |
+
+### Build / run notes
+```bat
+pip install -r requirements.txt
+python -m unittest discover -s tests -v
+python main.py
+```
+
+### Files touched
+`vault_settings.py`, `main.py`, `autofill_hud.py`, `vault_crypto.py`, `.gitignore`, `tests/test_vault_settings.py`, `tests/test_vault_crypto.py`
+
 ## REM-2
 
 ## REM-3

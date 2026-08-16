@@ -19,6 +19,9 @@ env/
 *.vpm
 *.vpm.bak
 
+# Local app settings (last vault path, timeouts)
+vaultpass.settings.json
+
 # OS
 Thumbs.db
 desktop.ini

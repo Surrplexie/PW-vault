@@ -6,6 +6,7 @@ import base64
 import io
 import sys
 import tkinter as tk
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
@@ -16,12 +17,19 @@ try:
 except ImportError:
     PIL_OK = False
 
-from vault_crypto import decrypt_vault, encrypt_vault, save_vault_blob
+from vault_crypto import (
+    decrypt_vault, encrypt_vault, restore_vault_from_backup,
+    save_vault_blob, vault_backup_path,
+)
 from vault_format import SiteEntry, parse_vault_text, serialize_vault_text
 from vault_items import (
     AddressEntry, CardEntry, ImageEntry, LoginGroup, parse_preamble,
 )
 from vault_search import build_matcher, describe_query, score_entry
+from vault_settings import (
+    IDLE_LOCK_CHOICES, IDLE_LOCK_LABELS, VaultSettings,
+    load_settings, save_settings,
+)
 from browser_watch import BrowserWatcher
 from autofill_hud import AutofillHUD, find_matches as hud_find_matches
 
@@ -855,10 +863,17 @@ class PasswordGenDialog(tk.Toplevel):
         self._rebuild_history()
 
     def _copy_val(self, val: str) -> None:
-        if val and "(select" not in val:
-            self.clipboard_clear()
-            self.clipboard_append(val)
-            self.update()
+        if not val or "(select" in val:
+            return
+        app = self.master
+        while app is not None and not callable(getattr(app, "_copy", None)):
+            app = getattr(app, "master", None)
+        if app is not None:
+            app._copy(val)
+            return
+        self.clipboard_clear()
+        self.clipboard_append(val)
+        self.update()
 
     def _use(self, val: str) -> None:
         if val and self._on_use and "(select" not in val:
@@ -903,6 +918,98 @@ class ChangePwDialog(tk.Toplevel):
         self.result = pw; self.destroy()
 
 
+# ── settings ──────────────────────────────────────────────────────────────────
+
+class SettingsDialog(tk.Toplevel):
+    """Edit persistent UI settings (timeouts, autofill default, idle lock)."""
+
+    def __init__(self, parent: "VaultApp", settings: VaultSettings) -> None:
+        super().__init__(parent)
+        self.configure(bg=BG)
+        self.title("Settings")
+        self.geometry("440x430")
+        self.resizable(False, False)
+        self.grab_set()
+        self.transient(parent)
+        self.result: VaultSettings | None = None
+        self._src = settings
+        self._build()
+
+    def _build(self) -> None:
+        pad = tk.Frame(self, bg=BG)
+        pad.pack(fill="both", expand=True, padx=20, pady=16)
+
+        tk.Label(pad, text="Settings", bg=BG, fg=FG,
+                 font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        tk.Label(pad, text="Stored next to the app — not inside the vault.",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 12))
+
+        self._clip_var = tk.IntVar(value=self._src.clip_clear_secs)
+        self._hud_var  = tk.IntVar(value=self._src.hud_hide_secs)
+        self._idle_var = tk.StringVar(value=IDLE_LOCK_LABELS.get(
+            self._src.idle_lock_secs, IDLE_LOCK_LABELS[600]))
+        self._af_var   = tk.BooleanVar(value=self._src.autofill_enabled)
+
+        self._spin(pad, "Clipboard auto-clear (seconds)", self._clip_var, 5, 300)
+        self._spin(pad, "Autofill HUD auto-hide (seconds)", self._hud_var, 5, 120)
+
+        tk.Label(pad, text="Idle auto-lock", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(10, 2))
+        idle = ttk.Combobox(
+            pad, textvariable=self._idle_var, state="readonly",
+            values=[IDLE_LOCK_LABELS[s] for s in IDLE_LOCK_CHOICES], width=28)
+        idle.pack(anchor="w", fill="x")
+        tk.Label(pad, text="Locks and wipes in-memory vault data after inactivity.",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 8))
+
+        tk.Checkbutton(
+            pad, text="Enable AutoFill HUD by default",
+            variable=self._af_var, bg=BG, fg=FG, selectcolor=INPUT,
+            activebackground=BG, activeforeground=FG,
+            font=("Segoe UI", 10), cursor="hand2",
+        ).pack(anchor="w", pady=(4, 8))
+
+        if self._src.last_vault_path:
+            tk.Label(pad, text=f"Last vault:\n{self._src.last_vault_path}",
+                     bg=BG, fg=MUTED, font=("Segoe UI", 8),
+                     wraplength=400, justify="left").pack(anchor="w", pady=(4, 0))
+
+        bar = tk.Frame(pad, bg=BG)
+        bar.pack(fill="x", pady=(18, 0))
+        ttk.Button(bar, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(bar, text="Save", style="Accent.TButton",
+                   command=self._save).pack(side="right", padx=(0, 8))
+
+    def _spin(self, parent: tk.Widget, label: str, var: tk.IntVar,
+              lo: int, hi: int) -> None:
+        tk.Label(parent, text=label, bg=BG, fg=MUTED,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 2))
+        ttk.Spinbox(parent, from_=lo, to=hi, textvariable=var,
+                    width=10, increment=5).pack(anchor="w")
+
+    def _save(self) -> None:
+        try:
+            clip = int(self._clip_var.get())
+            hud = int(self._hud_var.get())
+        except (tk.TclError, ValueError, TypeError):
+            messagebox.showwarning("Settings", "Enter valid numbers for the timeouts.",
+                                   parent=self)
+            return
+        idle_secs = 600
+        for secs, label in IDLE_LOCK_LABELS.items():
+            if label == self._idle_var.get():
+                idle_secs = secs
+                break
+        self.result = VaultSettings(
+            clip_clear_secs=clip,
+            hud_hide_secs=hud,
+            idle_lock_secs=idle_secs,
+            autofill_enabled=self._af_var.get(),
+            last_vault_path=self._src.last_vault_path,
+        ).clamp()
+        self.destroy()
+
+
 # ── main app ──────────────────────────────────────────────────────────────────
 
 class VaultApp(tk.Tk):
@@ -913,9 +1020,18 @@ class VaultApp(tk.Tk):
         self.geometry("1060x700")
         self.minsize(800, 540)
 
-        self._vault_path  = default_vault_path()
+        self._settings = load_settings()
+        self._vault_path = default_vault_path()
+        last = Path(self._settings.last_vault_path) if self._settings.last_vault_path else None
+        if last is not None and last.is_file():
+            self._vault_path = last
+        self._vault_path_var = tk.StringVar(value=str(self._vault_path))
         self._master_pw: str | None = None
         self._preamble    = ""
+        self._idle_job: str | None = None
+        self._clip_job: str | None = None
+        self._clip_left = 0
+        self._unlock_show = False
 
         # data stores per tab
         self._passwords: list[SiteEntry]    = []
@@ -929,7 +1045,7 @@ class VaultApp(tk.Tk):
         self._sel_idx:    int = -1
         self._sort_mode   = "az"
         self._shows:      dict[str, bool] = {}
-        self._clip_job:   str | None = None
+        self._photo_ref = None
 
         self._tab_btns:   dict[str, tk.Button] = {}
         self._listboxes:  dict[str, tk.Listbox] = {}
@@ -938,13 +1054,16 @@ class VaultApp(tk.Tk):
         # autofill subsystem (created on first unlock)
         self._watcher: BrowserWatcher | None = None
         self._hud:     AutofillHUD    | None = None
-        self._autofill_enabled = True
+        self._autofill_enabled = self._settings.autofill_enabled
 
         self._build_menu()
         self._unlock_frame = self._build_unlock_screen()
         self._main_frame   = self._build_main_screen()
         self._show_unlock()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind_all("<KeyPress>",    self._on_activity, add="+")
+        self.bind_all("<ButtonPress>", self._on_activity, add="+")
+        self.bind_all("<MouseWheel>",  self._on_activity, add="+")
 
     # ── properties ────────────────────────────────────────────────────────
 
@@ -966,13 +1085,16 @@ class VaultApp(tk.Tk):
         f = tk.Menu(bar, bg=PANEL, fg=FG, activebackground=ACCENT,
                     activeforeground="white", tearoff=0)
         f.add_command(label="Open vault…",             command=self._menu_open)
+        f.add_command(label="Restore from backup…",    command=self._restore_backup)
         f.add_command(label="Import plain text…",      command=self._import_plain)
         f.add_command(label="Export plain text…",      command=self._export_plain)
         f.add_separator()
+        f.add_command(label="Settings…",               command=self._open_settings)
         f.add_command(label="🎲 Password Generator…  Ctrl+G",
                       command=self._open_gen_standalone)
         f.add_separator()
         f.add_command(label="Change master password…", command=self._change_password)
+        f.add_command(label="Lock vault  Ctrl+L",      command=self._lock)
         f.add_separator()
         f.add_command(label="Exit",                    command=self._on_close)
         bar.add_cascade(label="File", menu=f)
@@ -985,6 +1107,9 @@ class VaultApp(tk.Tk):
         self.bind_all("<Control-n>", lambda _e: self._add_item())
         self.bind_all("<Control-f>", lambda _e: self._focus_search())
         self.bind_all("<Control-g>", lambda _e: self._open_gen_standalone())
+        self.bind_all("<Control-l>", self._on_lock_shortcut)
+        self.bind_all("<Control-c>", self._on_copy_shortcut)
+        self.bind_all("<Control-d>", self._on_duplicate_shortcut)
         self.bind_all("<Escape>",    lambda _e: self._on_escape())
 
     # ── unlock screen ─────────────────────────────────────────────────────
@@ -998,16 +1123,22 @@ class VaultApp(tk.Tk):
                   style="Sub.TLabel").pack(pady=(0, 24))
         ttk.Label(c, text="Master password").pack(anchor="w")
         self._pw_var = tk.StringVar()
-        pw = ttk.Entry(c, textvariable=self._pw_var, show="•", width=36)
-        pw.pack(fill="x", pady=(4, 4))
+        pw_row = ttk.Frame(c)
+        pw_row.pack(fill="x", pady=(4, 4))
+        pw = ttk.Entry(pw_row, textvariable=self._pw_var, show="•")
+        pw.pack(side="left", fill="x", expand=True)
         pw.bind("<Return>", lambda _e: self._try_unlock())
         self._pw_entry_ref = pw
+        self._unlock_eye_btn = ttk.Button(
+            pw_row, text="Show", style="Small.TButton", width=6,
+            command=self._toggle_unlock_pw)
+        self._unlock_eye_btn.pack(side="left", padx=(6, 0))
         self._pw_hint = ttk.Label(c, text="", style="Sub.TLabel", foreground=DANGER)
         self._pw_hint.pack(anchor="w", pady=(0, 12))
         ttk.Button(c, text="Unlock", style="Accent.TButton",
                    command=self._try_unlock).pack(anchor="w")
-        ttk.Label(c, text=f"\nVault: {self._vault_path}",
-                  style="Sub.TLabel").pack(anchor="w", pady=(16, 0))
+        ttk.Label(c, textvariable=self._vault_path_var,
+                  style="Sub.TLabel", wraplength=420).pack(anchor="w", pady=(16, 0))
         return f
 
     # ── main screen ───────────────────────────────────────────────────────
@@ -1023,7 +1154,8 @@ class VaultApp(tk.Tk):
         ttk.Button(tb, text="🎲 Gen PW", command=self._open_gen_standalone,
                    style="Small.TButton").pack(side="right", padx=4, pady=6)
 
-        self._autofill_btn_var = tk.StringVar(value="AutoFill ON")
+        self._autofill_btn_var = tk.StringVar(
+            value="AutoFill ON" if self._autofill_enabled else "AutoFill OFF")
         self._autofill_btn = ttk.Button(
             tb, textvariable=self._autofill_btn_var,
             command=self._toggle_autofill, style="Small.TButton")
@@ -1032,6 +1164,7 @@ class VaultApp(tk.Tk):
         for text, cmd in [
             ("Lock",       self._lock),
             ("Change PW",  self._change_password),
+            ("Settings",   self._open_settings),
             ("Export txt", self._export_plain),
             ("Import txt", self._import_plain),
         ]:
@@ -1134,6 +1267,8 @@ class VaultApp(tk.Tk):
             sb.pack(side="right", fill="y")
             lb.pack(fill="both", expand=True)
             lb.bind("<<ListboxSelect>>", lambda e, t=tid: self._on_list_select(t, e))
+            lb.bind("<Button-3>", lambda e, t=tid: self._on_list_context(t, e))
+            lb.bind("<Double-Button-1>", lambda _e: self._edit_item())
             self._listboxes[tid]   = lb
             self._list_frames[tid] = frm
 
@@ -1185,11 +1320,26 @@ class VaultApp(tk.Tk):
 
         # status bar
         self._status_var = tk.StringVar(value="Ready")
-        sb_bar = tk.Frame(root, bg=PANEL, height=24)
+        self._clip_var   = tk.StringVar(value="")
+        sb_bar = tk.Frame(root, bg=PANEL, height=26)
         sb_bar.pack(fill="x", side="bottom")
         tk.Frame(sb_bar, bg=BORDER, height=1).pack(fill="x")
         tk.Label(sb_bar, textvariable=self._status_var, bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 8), anchor="w").pack(side="left", padx=12, pady=2)
+        self._clip_now_btn = tk.Button(
+            sb_bar, text="Clear now", bg=PANEL, fg=MUTED,
+            relief="flat", font=("Segoe UI", 8),
+            activebackground=DANGER, activeforeground="white",
+            cursor="hand2", bd=0, padx=8,
+            command=lambda: self._cancel_clip_timer(clear=True))
+        self._clip_keep_btn = tk.Button(
+            sb_bar, text="Keep", bg=PANEL, fg=ACCENT,
+            relief="flat", font=("Segoe UI", 8),
+            activebackground=ACCENT, activeforeground="white",
+            cursor="hand2", bd=0, padx=8,
+            command=self._keep_clipboard)
+        tk.Label(sb_bar, textvariable=self._clip_var, bg=PANEL, fg=YELLOW,
+                 font=("Segoe UI", 8), anchor="e").pack(side="right", padx=(0, 8), pady=2)
 
         # activate first tab
         self._switch_tab("passwords", initial=True)
@@ -1213,12 +1363,21 @@ class VaultApp(tk.Tk):
 
     # ── visibility ────────────────────────────────────────────────────────
 
-    def _show_unlock(self) -> None:
+    def _show_unlock(self, hint: str = "") -> None:
         self._main_frame.pack_forget()
         self._unlock_frame.pack(fill="both", expand=True)
         self._pw_var.set("")
-        self._pw_hint.config(text="")
+        self._unlock_show = False
+        self._pw_entry_ref.configure(show="•")
+        self._unlock_eye_btn.configure(text="Show")
+        self._pw_hint.config(text=hint)
+        self._vault_path_var.set(str(self._vault_path))
         self._pw_entry_ref.focus()
+
+    def _toggle_unlock_pw(self) -> None:
+        self._unlock_show = not self._unlock_show
+        self._pw_entry_ref.configure(show="" if self._unlock_show else "•")
+        self._unlock_eye_btn.configure(text="Hide" if self._unlock_show else "Show")
 
     def _show_main(self) -> None:
         self._unlock_frame.pack_forget()
@@ -1248,14 +1407,102 @@ class VaultApp(tk.Tk):
         else:
             self._master_pw = pw
             self._autosave_silent()
+        self._settings.last_vault_path = str(self._vault_path)
+        self._persist_settings()
         self._show_main()
+        self._reset_idle()
 
-    def _lock(self) -> None:
-        self._autosave_silent()
-        self._master_pw = None
+    def _lock(self, reason: str = "", *, save: bool = True) -> None:
+        if save and self._master_pw:
+            self._autosave_silent()
         self._stop_autofill()
+        if self._hud is not None:
+            self._hud.destroy()
+            self._hud = None
+        self._cancel_clip_timer(clear=True)
+        self._cancel_idle()
+        self._close_extra_windows()
+        self._wipe_memory()
+        self._show_unlock(hint=reason)
+
+    def _wipe_memory(self) -> None:
+        self._master_pw = None
+        self._preamble = ""
+        for lst in (self._passwords, self._cards, self._addresses,
+                    self._logins, self._images):
+            lst.clear()
+        self._passwords = []
+        self._cards = []
+        self._addresses = []
+        self._logins = []
+        self._images = []
+        self._filtered = []
+        self._sel_idx = -1
+        self._shows.clear()
+        self._photo_ref = None
+        try:
+            self._search_var.set("")
+        except tk.TclError:
+            pass
+        for lb in self._listboxes.values():
+            lb.delete(0, tk.END)
         self._clear_detail()
-        self._show_unlock()
+
+    def _close_extra_windows(self) -> None:
+        for w in list(self.winfo_children()):
+            if isinstance(w, tk.Toplevel):
+                try:
+                    w.destroy()
+                except tk.TclError:
+                    pass
+
+    def _on_activity(self, _event: tk.Event | None = None) -> None:
+        if self._master_pw:
+            self._reset_idle()
+
+    def _cancel_idle(self) -> None:
+        if self._idle_job is not None:
+            try:
+                self.after_cancel(self._idle_job)
+            except tk.TclError:
+                pass
+            self._idle_job = None
+
+    def _reset_idle(self) -> None:
+        self._cancel_idle()
+        secs = self._settings.idle_lock_secs
+        if not self._master_pw or secs <= 0:
+            return
+        self._idle_job = self.after(secs * 1000, self._on_idle_timeout)
+
+    def _on_idle_timeout(self) -> None:
+        self._idle_job = None
+        if self._master_pw:
+            mins = max(1, self._settings.idle_lock_secs // 60)
+            self._lock(reason=f"Locked after {mins} min idle.")
+
+    def _on_lock_shortcut(self, _event: tk.Event | None = None):
+        if self._master_pw:
+            self._lock()
+        return "break"
+
+    def _focus_is_editable(self) -> bool:
+        w = self.focus_get()
+        if w is None:
+            return False
+        return w.winfo_class() in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox")
+
+    def _on_copy_shortcut(self, _event: tk.Event | None = None):
+        if not self._master_pw or self._focus_is_editable():
+            return
+        self._copy_primary()
+        return "break"
+
+    def _on_duplicate_shortcut(self, _event: tk.Event | None = None):
+        if not self._master_pw or self._focus_is_editable():
+            return
+        self._duplicate_item()
+        return "break"
 
     # ── search helpers ────────────────────────────────────────────────────
 
@@ -1426,6 +1673,8 @@ class VaultApp(tk.Tk):
         _detail_btn(top, "✕ Del", self._delete_item, bg=DANGER).pack(
             side="right")
         _detail_btn(top, "✏ Edit", self._edit_item).pack(
+            side="right", padx=(0, 6))
+        _detail_btn(top, "⧉ Dup", self._duplicate_item).pack(
             side="right", padx=(0, 6))
         tk.Frame(pad, bg=BORDER, height=1).pack(fill="x", pady=(4, 12))
 
@@ -1629,18 +1878,122 @@ class VaultApp(tk.Tk):
         self._filter()
         self._set_status(f"Deleted '{lbl}'")
 
+    def _duplicate_item(self) -> None:
+        idx = self._sel_idx
+        if idx < 0 or not self._master_pw:
+            return
+        original = self._store()[idx]
+        clone = _clone_item(original)
+        self._store().append(clone)
+        self._autosave_silent()
+        self._filter(select_label=_item_label(clone))
+        self._set_status(f"Duplicated '{_item_label(original)}'")
+        self._edit_item()
+
+    def _on_list_context(self, tab_id: str, event: tk.Event) -> None:
+        if not self._master_pw or tab_id != self._active_tab:
+            return
+        lb = self._listboxes[tab_id]
+        idx = lb.nearest(event.y)
+        if idx < 0 or idx >= lb.size():
+            return
+        lb.selection_clear(0, tk.END)
+        lb.selection_set(idx)
+        lb.activate(idx)
+        self._on_list_select(tab_id)
+        item = self._store()[self._filtered[idx]] if self._filtered else None
+        if item is None:
+            return
+
+        menu = tk.Menu(self, tearoff=0, bg=PANEL, fg=FG,
+                       activebackground=ACCENT, activeforeground="white")
+        copies = _copy_actions(item)
+        for label, val in copies:
+            if val:
+                menu.add_command(label=label, command=lambda v=val: self._copy(v))
+        if copies:
+            menu.add_separator()
+        menu.add_command(label="Edit", command=self._edit_item)
+        menu.add_command(label="Duplicate  Ctrl+D", command=self._duplicate_item)
+        menu.add_separator()
+        menu.add_command(label="Delete", command=self._delete_item)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _copy_primary(self) -> None:
+        idx = self._sel_idx
+        if idx < 0:
+            return
+        item = self._store()[idx]
+        for _, val in _copy_actions(item):
+            if val:
+                self._copy(val)
+                return
+        self._set_status("Nothing to copy.")
+
     # ── clipboard ─────────────────────────────────────────────────────────
 
     def _copy(self, val: str) -> None:
-        if self._clip_job:
-            self.after_cancel(self._clip_job)
+        if not val:
+            return
+        self._cancel_clip_timer(clear=False)
         self.clipboard_clear()
         self.clipboard_append(val)
         self.update()
-        def _clear() -> None:
-            self.clipboard_clear(); self._clip_job = None
-        self._clip_job = self.after(CLIP_CLEAR_SECS * 1000, _clear)
-        self._set_status(f"Copied!  Clipboard clears in {CLIP_CLEAR_SECS}s")
+        self._clip_left = self._settings.clip_clear_secs
+        self._show_clip_buttons(True)
+        self._clip_tick()
+        self._reset_idle()
+
+    def _clip_tick(self) -> None:
+        n = self._clip_left
+        if n <= 0:
+            self._cancel_clip_timer(clear=True)
+            return
+        self._clip_var.set(f"Clipboard clears in {n}s")
+        self._clip_left = n - 1
+        self._clip_job = self.after(1000, self._clip_tick)
+
+    def _show_clip_buttons(self, show: bool) -> None:
+        if show:
+            self._clip_keep_btn.pack(side="right", padx=(0, 2), pady=2)
+            self._clip_now_btn.pack(side="right", padx=(0, 6), pady=2)
+        else:
+            self._clip_keep_btn.pack_forget()
+            self._clip_now_btn.pack_forget()
+
+    def _keep_clipboard(self) -> None:
+        self._cancel_clip_timer(clear=False)
+        self._clip_var.set("Clipboard kept until next copy or lock.")
+        self._show_clip_buttons(False)
+
+    def _cancel_clip_timer(self, *, clear: bool, notice: bool = True) -> None:
+        if self._clip_job is not None:
+            try:
+                self.after_cancel(self._clip_job)
+            except tk.TclError:
+                pass
+            self._clip_job = None
+        self._clip_left = 0
+        self._show_clip_buttons(False)
+        if clear:
+            try:
+                self.clipboard_clear()
+            except tk.TclError:
+                pass
+            if notice:
+                self._clip_var.set("Clipboard cleared.")
+                self.after(
+                    4000,
+                    lambda: self._clip_var.set("")
+                    if self._clip_var.get() == "Clipboard cleared." else None,
+                )
+            else:
+                self._clip_var.set("")
+        elif not self._clip_var.get().startswith("Clipboard kept"):
+            self._clip_var.set("")
 
     # ── save / load ───────────────────────────────────────────────────────
 
@@ -1671,10 +2024,74 @@ class VaultApp(tk.Tk):
         p = filedialog.askopenfilename(
             title="Open vault",
             filetypes=[("VaultPass", "*.vpm"), ("All", "*.*")])
-        if p:
-            self._vault_path = Path(p)
-            self._master_pw  = None
-            self._show_unlock()
+        if not p:
+            return
+        if self._master_pw:
+            self._lock()
+        self._vault_path = Path(p)
+        self._vault_path_var.set(str(self._vault_path))
+        self._show_unlock()
+
+    def _restore_backup(self) -> None:
+        bak = vault_backup_path(self._vault_path)
+        if not bak.is_file():
+            messagebox.showinfo(
+                "Restore backup",
+                f"No backup found for this vault:\n{bak}",
+                parent=self,
+            )
+            return
+        if not messagebox.askyesno(
+            "Restore backup",
+            "Replace the current vault file with the previous save (.bak)?\n\n"
+            "The vault will lock. In-memory edits are discarded (the current file is not saved first).\n"
+            "If you changed the master password since that save, unlock with the old password.\n\n"
+            f"Backup:\n{bak}",
+            parent=self,
+            icon="warning",
+        ):
+            return
+        try:
+            restore_vault_from_backup(self._vault_path)
+        except OSError as ex:
+            messagebox.showerror("Restore failed", str(ex), parent=self)
+            return
+        self._lock(reason="Backup restored. Unlock to continue.", save=False)
+
+    def _open_settings(self) -> None:
+        dlg = SettingsDialog(self, self._settings)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+        dlg.result.last_vault_path = str(self._vault_path)
+        self._settings = dlg.result
+        self._persist_settings()
+        self._apply_settings()
+        self._set_status("Settings saved.")
+
+    def _apply_settings(self) -> None:
+        if self._hud is not None:
+            self._hud.set_hide_ms(self._settings.hud_hide_secs * 1000)
+        want_af = self._settings.autofill_enabled
+        if self._master_pw and want_af != self._autofill_enabled:
+            self._autofill_enabled = want_af
+            if want_af:
+                self._start_autofill()
+            else:
+                self._stop_autofill()
+                self._autofill_btn_var.set("AutoFill OFF")
+        elif not self._master_pw:
+            self._autofill_enabled = want_af
+            self._autofill_btn_var.set("AutoFill ON" if want_af else "AutoFill OFF")
+        self._reset_idle()
+
+    def _persist_settings(self) -> None:
+        self._settings.last_vault_path = str(self._vault_path)
+        self._settings.autofill_enabled = self._autofill_enabled
+        try:
+            save_settings(self._settings)
+        except OSError:
+            pass
 
     def _import_plain(self) -> None:
         if not self._master_pw: return
@@ -1841,13 +2258,17 @@ class VaultApp(tk.Tk):
         self._status_var.set(msg)
 
     def _about(self) -> None:
+        clip = self._settings.clip_clear_secs
+        idle = IDLE_LOCK_LABELS.get(self._settings.idle_lock_secs, "Off")
         messagebox.showinfo(APP_NAME,
             "VaultPass  •  offline encrypted vault\n\n"
             "Tabs:  🔑 Passwords  💳 Cards  🏠 Addresses  🔗 Login Via  🖼 Images\n\n"
             "• PBKDF2-HMAC-SHA256 (480k iter) + AES-Fernet\n"
-            f"• Clipboard auto-clears after {CLIP_CLEAR_SECS}s\n"
-            "• Ctrl+N  add  |  Ctrl+F  search  |  Ctrl+S  save\n"
-            "• Import: parses cards, addresses & login groups from plain .txt")
+            f"• Clipboard auto-clears after {clip}s  (Keep / Clear now in the status bar)\n"
+            f"• Idle auto-lock: {idle}\n"
+            "• Ctrl+N add  |  Ctrl+F search  |  Ctrl+S save\n"
+            "• Ctrl+C copy primary  |  Ctrl+D duplicate  |  Ctrl+L lock\n"
+            "• Right-click a list entry for copy / edit / duplicate / delete")
 
     # ── autofill subsystem ────────────────────────────────────────────────
 
@@ -1855,8 +2276,14 @@ class VaultApp(tk.Tk):
         if not self._autofill_enabled:
             return
         if self._hud is None:
-            self._hud = AutofillHUD(self)
+            self._hud = AutofillHUD(
+                self,
+                copy_fn=self._copy,
+                hide_ms=self._settings.hud_hide_secs * 1000,
+                activity_fn=self._reset_idle,
+            )
         else:
+            self._hud.set_hide_ms(self._settings.hud_hide_secs * 1000)
             self._hud.show()
         if self._watcher is not None:
             self._watcher.stop()
@@ -1879,6 +2306,8 @@ class VaultApp(tk.Tk):
 
     def _toggle_autofill(self) -> None:
         self._autofill_enabled = not self._autofill_enabled
+        self._settings.autofill_enabled = self._autofill_enabled
+        self._persist_settings()
         if self._autofill_enabled:
             self._start_autofill()
             self._set_status("AutoFill enabled — watches browser for matching domains.")
@@ -1908,8 +2337,16 @@ class VaultApp(tk.Tk):
             self._hud.hide()
 
     def _on_close(self) -> None:
-        self._autosave_silent()
+        if self._master_pw:
+            self._autosave_silent()
+        self._persist_settings()
         self._stop_autofill()
+        if self._hud is not None:
+            self._hud.destroy()
+            self._hud = None
+        self._cancel_clip_timer(clear=True, notice=False)
+        self._cancel_idle()
+        self._wipe_memory()
         self.destroy()
 
 
@@ -1921,6 +2358,53 @@ def _pw_to(e: SiteEntry) -> dict[str, Any]:
 
 def _pw_from(d: dict[str, Any]) -> SiteEntry:
     return SiteEntry(domain=d["domain"], lines=[tuple(x) for x in d.get("lines", [])])
+
+
+def _copy_name(name: str) -> str:
+    name = (name or "Item").rstrip()
+    return f"{name} (copy)"
+
+
+def _clone_item(item: Any) -> Any:
+    if isinstance(item, SiteEntry):
+        return SiteEntry(domain=_copy_name(item.domain), lines=list(item.lines))
+    if isinstance(item, CardEntry):
+        return dc_replace(item, name=_copy_name(item.name))
+    if isinstance(item, AddressEntry):
+        return dc_replace(item, label=_copy_name(item.label))
+    if isinstance(item, LoginGroup):
+        return dc_replace(item, via=_copy_name(item.via), sites=list(item.sites))
+    if isinstance(item, ImageEntry):
+        return dc_replace(item, name=_copy_name(item.name))
+    raise TypeError(f"Cannot duplicate {type(item)!r}")
+
+
+def _site_value(ent: SiteEntry, key: str) -> str:
+    for k, v in ent.lines:
+        if k == key and v not in _NULL_VALS:
+            return v
+    return ""
+
+
+def _copy_actions(item: Any) -> list[tuple[str, str]]:
+    """Primary copy action first (used by Ctrl+C)."""
+    if isinstance(item, SiteEntry):
+        return [
+            ("Copy password  Ctrl+C", _site_value(item, "Website Password")),
+            ("Copy username",         _site_value(item, "Website Username")),
+            ("Copy email",            _site_value(item, "Website Email")),
+        ]
+    if isinstance(item, CardEntry):
+        return [
+            ("Copy number  Ctrl+C", item.number),
+            ("Copy CVV",            item.cvv),
+            ("Copy expiry",         item.expiry),
+        ]
+    if isinstance(item, AddressEntry):
+        return [("Copy address  Ctrl+C", item.full_address())]
+    if isinstance(item, LoginGroup):
+        return [("Copy email  Ctrl+C", item.email)]
+    return []
 
 
 def _item_label(item: Any) -> str:
